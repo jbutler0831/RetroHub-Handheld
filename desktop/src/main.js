@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, screen, powerMonitor } = require('electron');
 const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -32,8 +32,30 @@ let settings = {
   graphics: { ...graphicsOptions.DEFAULTS },
   // 'system' (follow the OS), 'light' or 'dark': RetroHub's window only, never the OS setting.
   appearance: 'system',
+  // 'auto' (handheld on a small touch screen), 'handheld' or 'standard'.
+  layout: 'auto',
 };
 const APPEARANCES = ['system', 'light', 'dark'];
+const LAYOUTS = ['auto', 'handheld', 'standard'];
+/** The handheld layout draws everything this much larger. */
+const HANDHELD_ZOOM = 1.25;
+
+/**
+ * Whether to use the handheld layout. Automatic: a touch screen of about 1280×800 at its scaling
+ * (Steam Deck, ROG Ally at 150%, Legion Go at 200%), up to 1600×1000. A laptop with a touch
+ * screen may match too; Setup › Appearance › Layout overrides it.
+ */
+function handheldLayout() {
+  if (settings.layout === 'handheld') return true;
+  if (settings.layout !== 'auto') return false;
+  const display = win && !win.isDestroyed() ? screen.getDisplayMatching(win.getBounds()) : screen.getPrimaryDisplay();
+  const long = Math.max(display.size.width, display.size.height), short = Math.min(display.size.width, display.size.height);
+  return display.touchSupport === 'available' && long >= 1000 && long <= 1600 && short <= 1000;
+}
+
+function applyLayout() {
+  if (win && !win.isDestroyed()) win.webContents.setZoomFactor(handheldLayout() ? HANDHELD_ZOOM : 1);
+}
 
 /** Said once when the window opens, such as settings brought back from their backup: { title, message }. */
 let startupNotice = null;
@@ -233,6 +255,8 @@ function state() {
     recentLimit: RECENT_LIMIT,
     graphics: settings.graphics,
     appearance: settings.appearance,
+    layout: settings.layout,
+    handheld: handheldLayout(),
     libraryCheck: libraryCheck(),
     shadersMissing: graphicsOptions.shadersMissing(resolve(EMULATORS.find((e) => e.id === 'retroarch'), settings.emulatorPaths),
                                                    settings.graphics),
@@ -363,6 +387,15 @@ ipcMain.handle('setGraphics', (_, changes) => {
   return state();
 });
 
+ipcMain.handle('setLayout', (_, layout) => {
+  if (LAYOUTS.includes(layout)) {
+    settings.layout = layout;
+    saveSettings();
+    applyLayout();
+  }
+  return state();
+});
+
 ipcMain.handle('setAppearance', (_, appearance) => {
   if (APPEARANCES.includes(appearance)) {
     settings.appearance = appearance;
@@ -428,21 +461,6 @@ ipcMain.handle('showFile', (_, file) => {
 
 ipcMain.handle('setFullScreen', (_, on) => win?.setFullScreen(!!on));
 
-ipcMain.handle('gameMenu', (_, id) => {
-  const game = gamesById.get(id);
-  if (!game) return;
-  const favorite = settings.favorites.includes(id);
-  Menu.buildFromTemplate([
-    { label: 'Play', click: async () => {
-      const result = await play(id);
-      if (result.error) win.webContents.send('error', result.error);
-    } },
-    { label: favorite ? 'Remove from Favorites' : 'Add to Favorites', click: () => toggleFavorite(id) },
-    { type: 'separator' },
-    { label: process.platform === 'darwin' ? 'Show in Finder' : 'Show in Folder', click: () => shell.showItemInFolder(game.bootPath) },
-  ]).popup({ window: win });
-});
-
 // ---- Window -----------------------------------------------------------------
 
 function createWindow() {
@@ -460,6 +478,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
   win.once('ready-to-show', () => win.show());
+  win.webContents.on('did-finish-load', applyLayout);
   win.on('focus', () => {
     if (scanning || Date.now() - lastScanEnded < FOCUS_RESCAN_MS) return;
     rescan().then(sendState, () => {});
@@ -492,6 +511,12 @@ app.whenReady().then(() => {
   // The window opens straight away and says it's looking for games until the first scan is done.
   createWindow();
   rescan().then(sendState, () => {});
+  // After sleep, an SD card or drive may have come or gone.
+  powerMonitor.on('resume', () => rescan().then(sendState, () => {}));
+  screen.on('display-metrics-changed', () => {
+    applyLayout();
+    sendState();
+  });
 });
 
 app.on('window-all-closed', () => app.quit());

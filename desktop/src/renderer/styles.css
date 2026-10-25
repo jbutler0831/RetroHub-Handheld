@@ -163,9 +163,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border-bottom: 1px solid var(--border);
   flex: none;
 }
-#toolbar h1 { flex: 1; margin: 0; font-size: 15px; font-weight: 600; }
+#toolbar h1 { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.toolbar-actions { display: flex; align-items: center; gap: 6px; }
+/* On a narrow window (a handheld held upright), the search field gives up width first. */
+.toolbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
 .icon-button {
   display: grid;
@@ -184,6 +185,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   align-items: center;
   gap: 6px;
   width: 240px;
+  min-width: 100px;
+  flex: 0 4 240px;
   margin-left: 6px;
   padding: 0 10px;
   height: 30px;
@@ -500,11 +503,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .couch-details h2 .star { color: #ffd60a; margin-left: 8px; vertical-align: middle; }
 .couch-details p { margin: 6px 0 0; font-size: 19px; opacity: 0.7; }
 .couch-hints { position: relative; display: flex; justify-content: center; gap: 36px; padding: 0 0 40px; font-weight: 600; }
+/* Also buttons, for touch: tap A Play to play. */
+.couch-hints .hint { border: none; background: none; padding: 4px 6px; border-radius: 99px; color: inherit; font: inherit; white-space: nowrap; }
 .couch-hints span.label { opacity: 0.8; margin-left: 10px; }
+@media (max-width: 760px) { .couch-hints .hint.optional { display: none; } }
 .couch-close { position: absolute; top: 22px; right: 24px; z-index: 1; background: none; border: none; color: rgba(255,255,255,0.6); }
 .couch-empty { text-align: center; }
 .couch-empty h2 { font-size: 34px; margin: 12px 0 6px; }
 .couch-empty p { opacity: 0.7; font-size: 18px; }
+
+/* Handheld screens in the handheld layout, e.g. a Steam Deck's 1280×800 drawn 25% larger (1024×640). */
+@media (max-height: 720px) {
+  :root { --cover-w: 170px; --cover-h: 232px; --cover-gap: 28px; }
+  .couch-tabs { padding: 24px 60px 0; }
+  .couch-tabs .tab { font-size: 19px; }
+  .couch-details h2 { font-size: 26px; }
+  .couch-details p { font-size: 16px; margin-top: 4px; }
+  .couch-hints { gap: 24px; padding-bottom: 20px; }
+}
 
 /* Handheld and small screens, e.g. 800x480 and 640x480. */
 @media (max-height: 600px) {
@@ -532,7 +548,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   .couch-details { padding: 0 12px; }
   .couch-details h2 { font-size: 15px; }
   .couch-details p { font-size: 11px; }
-  .couch-hints { gap: 12px; padding-bottom: 6px; font-size: 11px; }
+  .couch-hints { gap: 6px; padding-bottom: 6px; font-size: 11px; }
+  .couch-hints .hint { padding: 2px; }
   .couch-hints span.label { margin-left: 4px; }
   .couch-close { top: 2px; right: 2px; }
   .couch-empty svg { width: 32px; height: 32px; }
@@ -544,7 +561,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(0, 0, 0, 0.35); }
 .modal-box {
-  width: 360px;
+  width: min(360px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
   padding: 24px;
   border-radius: 14px;
   background: var(--surface);
@@ -555,6 +574,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .modal-box h2 { margin: 8px 0 6px; font-size: 16px; }
 .modal-box p { margin: 0 0 18px; color: var(--text-2); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
 .modal-box .button { width: 100%; justify-content: center; padding: 7px; }
+.modal-actions { display: flex; flex-direction: column; gap: 8px; }
+.modal-icon:empty { display: none; }
+.button.destructive { color: #d70015; }
+@media (prefers-color-scheme: dark) { .button.destructive { color: #ff6961; } }
 
 /* From Play until the emulator's window takes over: no animation, so it costs nothing while a game starts. */
 .launching { position: fixed; inset: 0; z-index: 19; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); }
@@ -563,3 +586,45 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .launching-box strong { font-size: 22px; overflow-wrap: anywhere; }
 .launching-box span { font-size: 15px; opacity: 0.75; }
 .launching-box .launching-hint { font-size: 13px; opacity: 0.5; }
+
+/* ---- Controller and keyboard focus ---- */
+
+/* The button the D-pad or Tab has reached: a thick outline that's clear at arm's length. The
+   sidebar rows and the games have their own blue highlight. */
+html[data-input="nav"] :is(.button, .icon-button, .segmented button, .hint, .couch-close, input):focus,
+:is(.button, .icon-button, .segmented button, .hint, .couch-close):focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.couch-hints .hint:focus { outline-color: #fff; }
+
+.controls-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 16px; padding: 12px 16px; margin-top: 10px; }
+.control-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.controls-list .button-badge { background: var(--selected-row); color: var(--text); min-width: 64px; text-align: center; }
+.layout-panel { margin-top: 10px; }
+
+/* ---- Toast ---- */
+
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 30; max-width: calc(100vw - 32px);
+  padding: 10px 18px; border-radius: 99px; background: rgba(28, 28, 30, 0.92); color: #fff; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+
+/* ---- Handheld layout ----
+   Everything is drawn 25% larger (main.js zooms the window); on top of that, buttons get room for a
+   thumb, and the cover's Play button shows on the picked game, since touch has no hover. */
+
+html.handheld .button { padding: 8px 14px; }
+html.handheld .button.small { padding: 8px 12px; }
+html.handheld .segmented button { padding: 9px 14px; }
+html.handheld .nav-item { padding: 8px 10px; }
+html.handheld .icon-button { width: 40px; height: 36px; }
+html.handheld .search { height: 36px; }
+html.handheld .card.selected .play-button { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+html.handheld .couch-backdrop { filter: blur(24px) saturate(1.2); }
+@media (hover: none) {
+  .card.selected .play-button { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+}

@@ -61,6 +61,18 @@ The Mac app and the Windows/Linux/Raspberry Pi app work the same way.
   | Leave couch mode, close a message | Esc | B / ○ |
 
   Each list remembers the game you picked, in the browser and in couch mode.
+
+  **Windows/Linux app, controller only:** the controller reaches the whole window, not just the games, so a handheld
+  needs no mouse. The D-pad moves through the sidebar, the games, the buttons on Setup and Library Check, and dialogs
+  (← from the first game goes to the sidebar, ↑ from the first row to the buttons above); held, it keeps going.
+  A presses the picked button, B always goes back a step, X (□) opens a game's options (also right-click, a long
+  press or the Menu key), and Select / View opens Setup, from couch mode too (B returns). RetroHub says when a
+  controller connects or disconnects.
+- **Handheld layout (Windows/Linux).** Larger text and buttons for a 7–8" screen: on automatically on a small touch
+  screen, or choose it in Setup › Appearance › Layout. Tap a game to pick it and tap again to play.
+- **Starting a game (Windows/Linux).** "Starting …" shows until the emulator opens, and extra presses start nothing.
+  If the emulator closes with an error straight away (a missing BIOS, say), RetroHub shows what it printed; the game
+  doesn't count as played.
 - **Screen readers.** Sidebar rows read as, for example, "Sega Genesis, 1 game, setup needed". In the Windows/Linux app,
   moving between games also announces each one.
 

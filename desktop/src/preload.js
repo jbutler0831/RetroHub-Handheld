@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('retrohub', {
   libraryAction: (action, details) => ipcRenderer.invoke('libraryAction', action, details),
   setGraphics: (changes) => ipcRenderer.invoke('setGraphics', changes),
   setAppearance: (appearance) => ipcRenderer.invoke('setAppearance', appearance),
+  setLayout: (layout) => ipcRenderer.invoke('setLayout', layout),
   cover: (id) => ipcRenderer.invoke('cover', id),
   chooseRoot: () => ipcRenderer.invoke('chooseRoot'),
   locateEmulator: (id) => ipcRenderer.invoke('locateEmulator', id),
@@ -16,7 +17,6 @@ contextBridge.exposeInMainWorld('retrohub', {
   openFolder: (systemId) => ipcRenderer.invoke('openFolder', systemId),
   setFullScreen: (on) => ipcRenderer.invoke('setFullScreen', on),
   showFile: (file) => ipcRenderer.invoke('showFile', file),
-  gameMenu: (id) => ipcRenderer.invoke('gameMenu', id),
   onState: (callback) => ipcRenderer.on('state', (_, state) => callback(state)),
   onError: (callback) => ipcRenderer.on('error', (_, message) => callback(message)),
 });

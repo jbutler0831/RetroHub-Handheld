@@ -124,7 +124,7 @@ function cardHtml(game, showSystem) {
     <div class="cover" style="--c:${system.color}" data-cover="${esc(game.id)}">
       ${placeholder(game, system)}<img alt="" hidden>
       ${favorite ? `<span class="fav-badge">${I.star({ size: 12 })}</span>` : ''}
-      <button class="play-button" data-play title="Play" aria-label="Play ${esc(game.displayTitle)}">${I.play({ size: 22 })}</button>
+      <button class="play-button" data-play tabindex="-1" title="Play" aria-label="Play ${esc(game.displayTitle)}">${I.play({ size: 22 })}</button>
     </div>
     <div class="card-title">${esc(game.displayTitle)}</div>
     ${showSystem ? `<div class="card-sub">${esc(system.name)}</div>` : ''}
@@ -198,13 +198,36 @@ function renderController() {
   const el = $('controller-status');
   el.classList.toggle('connected', !!padName);
   el.innerHTML = `${I.gamepad({ size: 18 })}<span>${esc(padName || 'No controller')}</span>`;
-  el.title = padName ? 'A: play · Y: favorite · LB/RB: switch · Start: couch mode' : 'Connect a controller and press any button';
+  el.title = padName ? 'A: play · B: back · X: options · Y: favorite · LB/RB: switch · Start: couch mode · Select: Setup' : 'Connect a controller and press any button';
+}
+
+/**
+ * Where focus is among the page's buttons, to put it back after a redraw: a selector made of the
+ * button's data attributes (the same button after the redraw), and its place in the list (the
+ * nearest one, when that button is gone).
+ */
+function focusMark() {
+  const el = document.activeElement;
+  if (!content.contains(el) || el === content) return null;
+  const attributes = [...el.attributes].filter((a) => a.name.startsWith('data-'));
+  return {
+    selector: attributes.length ? `${el.tagName.toLowerCase()}${attributes.map((a) => `[${a.name}="${CSS.escape(a.value)}"]`).join('')}` : null,
+    index: focusables().indexOf(el),
+  };
+}
+
+function restoreFocus(mark) {
+  if (!mark) return;
+  const list = focusables();
+  const el = (mark.selector && content.querySelector(mark.selector)) || list[Math.min(mark.index, list.length - 1)];
+  (el || content).focus({ preventScroll: true });
 }
 
 function renderContent() {
   const info = itemInfo(selection);
   $('toolbar-title').textContent = info.title;
   const scroll = content.scrollTop;
+  const mark = focusMark();
   if (selection === 'setup') {
     renderSetup();
   } else if (selection === 'check') {
@@ -225,6 +248,7 @@ function renderContent() {
     announce(games, selectedGame[selection]);
   }
   content.scrollTop = scroll;
+  restoreFocus(mark);
 }
 
 const lookingHtml = () => `<div class="empty"><h3>Looking for games…</h3><p>Reading ${esc(S.libraryRoot)}.</p></div>`;
@@ -333,6 +357,11 @@ function renderSetup() {
           <div class="segmented">${[['system', 'Follow System'], ['light', 'Light'], ['dark', 'Dark']].map(([value, label]) =>
             `<button class="${S.appearance === value ? 'active' : ''}" data-appearance="${value}">${label}</button>`).join('')}</div>
         </div>
+        <div class="panel graphics-panel layout-panel">
+          ${graphicsRow('Layout', `Handheld makes text and buttons larger for small screens held at arm's length. Automatic uses it on small touch screens${S.handheld && S.layout === 'auto' ? ', like this one' : ''}.`,
+            `<div class="segmented">${[['auto', 'Automatic'], ['handheld', 'Handheld'], ['standard', 'Standard']].map(([value, label]) =>
+              `<button class="${S.layout === value ? 'active' : ''}" data-layout="${value}">${label}</button>`).join('')}</div>`)}
+        </div>
       </section>
       <section>
         <h3>Controller</h3>
@@ -342,10 +371,15 @@ function renderSetup() {
           <div class="grow">
             <strong>${esc(padName || 'No controller connected')}</strong>
             <div class="card-sub" style="text-align:left">${padName
-              ? 'A to play · Y to favorite · LB/RB to switch · Start for couch mode'
-              : 'Connect one, then press any button so RetroHub can see it.'}</div>
+              ? 'Ready. These buttons work everywhere in RetroHub:'
+              : 'Connect one, then press any button so RetroHub can see it. Built-in controls on handhelds count too.'}</div>
           </div>
         </div>
+        <div class="panel controls-list">${[
+          ['D-pad / stick', 'Move (hold to keep going)'], ['A', 'Play, or press the button that\'s picked'], ['B', 'Back'],
+          ['X', 'Game options'], ['Y', 'Favorite'], ['LB / RB', 'Previous / next system'],
+          ['Start / Menu', 'Couch mode, full screen'], ['Select / View', 'Setup'],
+        ].map(([button, action]) => `<div class="control-row"><span class="button-badge">${esc(button)}</span><span>${esc(action)}</span></div>`).join('')}</div>
       </section>
       <section>
         <h3>BIOS &amp; Firmware</h3>
@@ -426,7 +460,13 @@ async function checkAction(action, target) {
   else if (action === 'removeMissing') next = await api.libraryAction('removeMissing', { paths: [d.path] });
   else if (action === 'removeAllMissing') {
     const count = c.missing.length;
-    if (!confirm(`Remove ${count === 1 ? 'the missing game' : `all ${count} missing games`}? Their favorites and play history are forgotten.`)) return;
+    const sure = await openDialog({
+      title: count === 1 ? 'Remove the missing game?' : `Remove all ${count} missing games?`,
+      message: 'Their favorites and play history are forgotten.',
+      buttons: [{ label: 'Remove', value: true, destructive: true }, { label: 'Cancel', value: false, primary: true }],
+      cancel: false,
+    });
+    if (!sure) return;
     next = await api.libraryAction('removeMissing', { paths: c.missing.map((m) => m.path) });
   } else if (action === 'lookAgain') {
     for (const g of c.noArt) coverCache.delete(g.id);
@@ -461,7 +501,8 @@ function renderCouch() {
   }
   const games = gamesFor(selection);
   couchIndex = Math.min(couchIndex, Math.max(0, games.length - 1));
-  const hint = (button, label) => `<span><span class="button-badge">${button}</span><span class="label">${label}</span></span>`;
+  const hint = (button, label, cmd, optional = false) =>
+    `<button class="hint${optional ? ' optional' : ''}" data-command="${cmd}"><span class="button-badge">${button}</span><span class="label">${label}</span></button>`;
   couchEl.innerHTML = `<div class="couch-backdrop" id="couch-backdrop"></div>
     <button class="couch-close icon-button" data-exit title="Exit couch mode (Esc)">${I.close({ size: 22 })}</button>
     <div class="couch-tabs">
@@ -475,7 +516,7 @@ function renderCouch() {
       : S.scanned ? `<div class="couch-empty">${I.gamepad({ size: 64 })}<h2>No games yet</h2><p>Add games to ${esc(S.libraryRoot)} to see them here.</p></div>`
       : `<div class="couch-empty">${I.gamepad({ size: 64 })}<h2>Looking for games…</h2></div>`}
     </div>
-    <div class="couch-hints">${hint('A', 'Play')}${hint('Y', 'Favorite')}${hint('LB RB', 'Switch')}${hint('B', 'Exit')}</div>`;
+    <div class="couch-hints">${hint('A', 'Play', 'play')}${hint('X', 'Options', 'menu', true)}${hint('Y', 'Favorite', 'favorite')}${hint('LB RB', 'Switch', 'next')}${hint('Select', 'Setup', 'setup', true)}${hint('B', 'Exit', 'back')}</div>`;
   loadCovers(couchEl);
   // On a small screen not every tab fits: keep the current list's tab in the middle.
   couchEl.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -506,6 +547,7 @@ function updateCouch() {
 
 function setCouch(on) {
   couch = on;
+  setupFromCouch = false;
   const keys = couchKeys();
   if (on && keys.length && !keys.includes(selection)) selection = keys[0];
   couchIndex = pickedIndex();
@@ -514,21 +556,76 @@ function setCouch(on) {
   if (!on) content.focus();
 }
 
-// ---- Actions -----------------------------------------------------------------------
+// ---- Dialogs -----------------------------------------------------------------------
 
-function showModal(message, title = "Couldn't start the game") {
+/** The open dialog: { buttons, cancel, resolve, returnFocus }, or null. */
+let dialog = null;
+
+/**
+ * An in-app dialog, which works with a controller, touch, the keyboard and the mouse (the system's
+ * own dialogs and menus don't take a controller). Resolves with the chosen button's value, or with
+ * `cancel` for B, Esc or a tap outside. Focus goes to the first button and back to where it was.
+ */
+function openDialog({ title, message = '', alert = true, buttons, cancel = null }) {
+  const returnFocus = dialog ? dialog.returnFocus : document.activeElement;
+  if (dialog) dialog.resolve(dialog.cancel);
   hideLaunching();
   $('modal-title').textContent = title;
   $('modal-message').textContent = message;
-  $('modal').querySelector('.modal-icon').innerHTML = I.alert({ size: 34 });
+  $('modal-message').hidden = !message;
+  modal.querySelector('.modal-icon').innerHTML = alert ? I.alert({ size: 34 }) : '';
+  $('modal-actions').innerHTML = buttons.map((b, i) =>
+    `<button class="button${b.primary ? ' primary' : ''}${b.destructive ? ' destructive' : ''}" data-dialog="${i}">${esc(b.label)}</button>`).join('');
   modal.hidden = false;
-  $('modal-ok').focus();
+  $('modal-actions').querySelector('button').focus();
+  return new Promise((resolve) => {
+    dialog = { buttons, cancel, returnFocus, resolve: (value) => {
+      dialog = null;
+      modal.hidden = true;
+      const back = returnFocus && returnFocus !== document.body && document.contains(returnFocus) ? returnFocus : content;
+      back.focus({ preventScroll: true });
+      resolve(value);
+    } };
+  });
 }
 
-function hideModal() {
-  modal.hidden = true;
-  content.focus();
+const closeDialog = () => dialog?.resolve(dialog.cancel);
+
+function showModal(message, title = "Couldn't start the game") {
+  return openDialog({ title, message, buttons: [{ label: 'OK', primary: true, value: true }], cancel: true });
 }
+
+/** Play, favorite or show a game: X on the controller, right-click, a long press, or the Menu key. */
+async function gameMenu(id) {
+  const game = allGames().find((g) => g.id === id);
+  if (!game) return;
+  const favorite = S.favorites.includes(id);
+  const choice = await openDialog({
+    title: game.displayTitle,
+    message: systemById(game.system).name,
+    alert: false,
+    buttons: [
+      { label: 'Play', value: 'play', primary: true },
+      { label: favorite ? 'Remove from Favorites' : 'Add to Favorites', value: 'favorite' },
+      { label: S.platform === 'darwin' ? 'Show in Finder' : 'Show in Folder', value: 'show' },
+      { label: 'Cancel', value: null },
+    ],
+  });
+  if (choice === 'play') play(id);
+  else if (choice === 'favorite') api.toggleFavorite(id);
+  else if (choice === 'show') api.showFile(id);
+}
+
+/** A short message at the bottom that goes away by itself, such as a controller connecting. */
+function showToast(text) {
+  const el = $('toast');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => { el.hidden = true; }, 3000);
+}
+
+// ---- Actions -----------------------------------------------------------------------
 
 /**
  * "Starting Contra…" from the moment Play is pressed until the emulator's window comes to the front
@@ -562,7 +659,7 @@ async function play(id) {
     result = { error: error.message };
   }
   if (result.error) return showModal(result.error);
-  if (result.busy) return hideLaunching(); // Already starting from the game's menu.
+  if (result.busy) return hideLaunching();
   if (!document.hasFocus()) return hideLaunching(); // The emulator is already in front.
   if (launching?.id === id) showLaunching(game, result.label);
   if (couch && selection === 'recent') couchIndex = 0; // The game just moved to the front.
@@ -573,7 +670,7 @@ function select(id, scroll = false) {
   content.querySelectorAll('.card.selected').forEach((c) => c.classList.remove('selected'));
   const card = content.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
   card?.classList.add('selected');
-  if (scroll) card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (scroll) card?.scrollIntoView({ block: 'nearest', behavior: inputMode() === 'pointer' ? 'smooth' : 'auto' });
   announce(visibleGames(), id);
 }
 
@@ -594,12 +691,22 @@ function gridColumns() {
   return Math.max(1, cards.filter((c) => c.offsetTop === cards[0]?.offsetTop).length);
 }
 
+/**
+ * Moves the picked game. Off the left edge of the grid goes to the sidebar, and off the top to the
+ * buttons above it (the Library changed banner, Get <emulator>), so the controller reaches them.
+ */
 function move(dx, dy) {
   const games = visibleGames();
   if (!games.length) return;
   const current = games.findIndex((g) => g.id === selectedGame[selection]);
   if (current < 0) return select(games[0].id, true);
-  const next = Math.min(Math.max(current + dx + dy * gridColumns(), 0), games.length - 1);
+  const columns = gridColumns();
+  if (dx < 0 && current % columns === 0) return focusSidebar();
+  if (dy < 0 && current < columns) {
+    const above = focusables();
+    if (above.length) return focusElement(above[above.length - 1]);
+  }
+  const next = Math.min(Math.max(current + dx + dy * columns, 0), games.length - 1);
   select(games[next].id, true);
 }
 
@@ -640,10 +747,52 @@ function stepSidebar(step) {
 
 const focusSidebar = () => nav.querySelector('.nav-item.active')?.focus();
 
-/** Handles a controller or keyboard command. */
+/** The buttons the D-pad can reach in a part of the window, in page order. Play buttons on covers are for the mouse. */
+function focusables(root = content) {
+  return [...root.querySelectorAll('button, input, select, [tabindex="0"]')]
+    .filter((el) => !el.disabled && !el.matches('.play-button') && el.getClientRects().length);
+}
+
+function focusElement(el) {
+  el.focus({ preventScroll: true });
+  el.scrollIntoView({ block: 'nearest' });
+}
+
+/** Moves focus to the nearest button that way; false when there's none. */
+function moveFocus(direction, root = content) {
+  const list = focusables(root);
+  const from = list.indexOf(document.activeElement);
+  if (from < 0) {
+    if (list[0]) focusElement(list[0]);
+    return !!list[0];
+  }
+  const next = SPATIAL.nextInDirection(list.map((el) => el.getBoundingClientRect()), from, direction);
+  if (next < 0) return false;
+  focusElement(list[next]);
+  return true;
+}
+
+/** Into the page from the sidebar: the games, or the first button on a page without games. */
+function enterContent() {
+  if (gamesFor(selection).length && selection !== 'setup' && selection !== 'check') return content.focus();
+  const first = focusables()[0];
+  first ? focusElement(first) : content.focus();
+}
+
+/** Setup from couch mode (Select): B on Setup goes back to couch mode. */
+let setupFromCouch = false;
+
+const DIRECTIONS = ['up', 'down', 'left', 'right'];
+
+/**
+ * Handles a controller or keyboard command. What it does depends on where focus is: a dialog, the
+ * sidebar, buttons on a page, or the game grid. B always goes back a step, so focus is never stuck.
+ */
 function command(cmd) {
-  if (!modal.hidden) {
-    if (cmd === 'play' || cmd === 'back') hideModal();
+  if (dialog) {
+    if (DIRECTIONS.includes(cmd)) moveFocus(cmd, modal);
+    else if (cmd === 'play') (modal.contains(document.activeElement) && document.activeElement.matches('button') ? document.activeElement : $('modal-actions').querySelector('button'))?.click();
+    else if (cmd === 'back') closeDialog();
     return;
   }
   if (launching) {
@@ -660,25 +809,73 @@ function command(cmd) {
       case 'down': case 'next': return cycle(1);
       case 'play': return games[couchIndex] && play(games[couchIndex].id);
       case 'favorite': return games[couchIndex] && api.toggleFavorite(games[couchIndex].id);
+      case 'menu': return games[couchIndex] && gameMenu(games[couchIndex].id);
+      case 'setup':
+        show('setup');
+        setupFromCouch = true;
+        return enterContent();
       case 'back': case 'couch': return setCouch(false);
     }
     return;
   }
+  switch (cmd) {
+    case 'prev': return cycle(-1);
+    case 'next': return cycle(1);
+    case 'couch': return setCouch(true);
+    case 'setup':
+      show('setup');
+      return enterContent();
+  }
+  const active = document.activeElement;
+  if (nav.contains(active)) {
+    if (cmd === 'up' || cmd === 'down') return stepSidebar(cmd === 'up' ? -1 : 1);
+    if (cmd === 'right' || cmd === 'play') return enterContent();
+    return;
+  }
+  const onButton = content.contains(active) && active !== content;
+  const games = selection === 'setup' || selection === 'check' ? [] : visibleGames();
+  // Buttons: Setup, Library Check, a page without games, or the buttons above the games.
+  if (onButton || !games.length) {
+    if (DIRECTIONS.includes(cmd)) {
+      if (moveFocus(cmd)) return;
+      if (cmd === 'left') return focusSidebar();
+      if (cmd === 'down' && games.length) return content.focus();
+      return;
+    }
+    if (cmd === 'play') return onButton ? active.click() : enterContent();
+    if (cmd === 'back') {
+      if (setupFromCouch && selection === 'setup') return setCouch(true);
+      return onButton && games.length ? content.focus() : focusSidebar();
+    }
+    return;
+  }
+  if (!content.contains(active)) content.focus(); // From the search field, say: the games take the controller.
   const id = selectedGame[selection];
   switch (cmd) {
     case 'left': return move(-1, 0);
     case 'right': return move(1, 0);
     case 'up': return move(0, -1);
     case 'down': return move(0, 1);
-    case 'play': return id && visibleGames().some((g) => g.id === id) && play(id);
+    case 'play': return id && games.some((g) => g.id === id) && play(id);
     case 'favorite': return id && api.toggleFavorite(id);
-    case 'prev': return cycle(-1);
-    case 'next': return cycle(1);
-    case 'couch': return setCouch(true);
+    case 'menu': return id && games.some((g) => g.id === id) && gameMenu(id);
+    case 'back': return focusSidebar();
   }
 }
 
 // ---- Events ------------------------------------------------------------------------
+
+/**
+ * How the window is being used: 'nav' (controller or keyboard), so the focused button gets a
+ * clear outline, or 'pointer' (mouse or touch). lastPointer is 'mouse', 'touch' or 'pen'.
+ */
+let lastPointer = 'mouse';
+const inputMode = () => document.documentElement.dataset.input || 'pointer';
+const setInputMode = (mode) => { document.documentElement.dataset.input = mode; };
+window.addEventListener('pointerdown', (event) => {
+  lastPointer = event.pointerType;
+  setInputMode('pointer');
+}, true);
 
 nav.addEventListener('click', (event) => {
   const item = event.target.closest('[data-key]');
@@ -689,7 +886,7 @@ nav.addEventListener('click', (event) => {
 });
 
 async function handleButtons(event) {
-  const target = event.target.closest('[data-download], [data-open-folder], [data-choose-root], [data-locate], [data-play], [data-exit], [data-tab], [data-graphics], [data-appearance], [data-show], [data-check]');
+  const target = event.target.closest('[data-download], [data-open-folder], [data-choose-root], [data-locate], [data-play], [data-exit], [data-tab], [data-graphics], [data-appearance], [data-layout], [data-show], [data-check], [data-command]');
   if (!target) return false;
   const d = target.dataset;
   if ('download' in d) api.openDownload(d.download);
@@ -701,8 +898,10 @@ async function handleButtons(event) {
   else if ('tab' in d) { selection = d.tab; couchIndex = pickedIndex(); render(); }
   else if ('graphics' in d) applyState(await api.setGraphics({ [d.graphics]: JSON.parse(d.value) }));
   else if ('appearance' in d) applyState(await api.setAppearance(d.appearance));
-  else if ('show' in d) { show(d.show); content.focus(); }
+  else if ('layout' in d) applyState(await api.setLayout(d.layout));
+  else if ('show' in d) { show(d.show); enterContent(); }
   else if ('check' in d) await checkAction(d.check, target);
+  else if ('command' in d) command(d.command);
   return true;
 }
 
@@ -710,33 +909,52 @@ content.addEventListener('click', async (event) => {
   if (await handleButtons(event)) return;
   const card = event.target.closest('.card');
   if (card) {
+    // On a touch screen, a tap picks a game and a second tap plays it.
+    const picked = card.classList.contains('selected');
     select(card.dataset.id);
     content.focus();
+    if (picked && lastPointer === 'touch') play(card.dataset.id);
   }
 });
 content.addEventListener('dblclick', (event) => {
   const card = event.target.closest('.card');
-  if (card && !event.target.closest('button')) play(card.dataset.id);
+  if (card && !event.target.closest('button') && lastPointer !== 'touch') play(card.dataset.id);
 });
 content.addEventListener('contextmenu', (event) => {
   const card = event.target.closest('.card');
   if (!card) return;
   event.preventDefault();
   select(card.dataset.id);
-  api.gameMenu(card.dataset.id);
+  gameMenu(card.dataset.id);
 });
 
 couchEl.addEventListener('click', async (event) => {
   if (await handleButtons(event)) return;
   const el = event.target.closest('[data-index]');
   if (el) {
-    couchIndex = Number(el.dataset.index);
+    const index = Number(el.dataset.index);
+    if (index === couchIndex && lastPointer === 'touch') return command('play');
+    couchIndex = index;
     updateCouch();
   }
 });
 couchEl.addEventListener('dblclick', (event) => {
   const el = event.target.closest('[data-index]');
-  if (el) command('play');
+  if (el && lastPointer !== 'touch') command('play');
+});
+couchEl.addEventListener('contextmenu', (event) => {
+  const el = event.target.closest('[data-index]');
+  if (!el) return;
+  event.preventDefault();
+  couchIndex = Number(el.dataset.index);
+  updateCouch();
+  command('menu');
+});
+
+modal.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-dialog]');
+  if (button && dialog) dialog.resolve(dialog.buttons[Number(button.dataset.dialog)].value);
+  else if (event.target === modal) closeDialog(); // A tap outside the box.
 });
 
 $('couch-button').innerHTML = I.tv({ size: 18 });
@@ -744,53 +962,43 @@ $('rescan-button').innerHTML = I.refresh({ size: 17 });
 document.querySelector('.search-icon').innerHTML = I.search({ size: 14 });
 $('couch-button').addEventListener('click', () => setCouch(true));
 $('rescan-button').addEventListener('click', async () => applyState(await api.rescan(), true));
-$('modal-ok').addEventListener('click', hideModal);
 $('search').addEventListener('input', (event) => {
   search = event.target.value;
   renderContent();
 });
 
-const KEYS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Enter: 'play', f: 'favorite', F: 'favorite', Escape: 'back' };
+const KEYS = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Enter: 'play', f: 'favorite', F: 'favorite',
+               Escape: 'back', ContextMenu: 'menu' };
 // Ctrl (⌘ on a Mac) shortcuts, as in the Mac app's menus: Setup, Find, Previous/Next System, Rescan.
 const SHORTCUTS = {
-  ',': () => show('setup'),
+  ',': () => command('setup'),
   f: findGames,
   '[': () => cycle(-1),
   ']': () => cycle(1),
   r: async () => applyState(await api.rescan(), true),
 };
 window.addEventListener('keydown', (event) => {
+  setInputMode('nav');
   if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-    const shortcut = modal.hidden && SHORTCUTS[event.key.toLowerCase()];
+    const shortcut = !dialog && SHORTCUTS[event.key.toLowerCase()];
     if (shortcut) {
       event.preventDefault();
       shortcut();
     }
     return; // Copy, paste and the rest behave as usual.
   }
-  if (launching && event.key === 'Escape') {
+  if (event.key === 'Tab' && dialog) {
+    // Tab stays in the dialog.
+    const buttons = focusables(modal);
+    const index = buttons.indexOf(document.activeElement);
     event.preventDefault();
-    return hideLaunching();
+    buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length]?.focus();
+    return;
   }
-  if (event.target.id === 'search') {
+  if (event.target.id === 'search' && !dialog) {
     if (event.key === 'Escape') event.target.blur();
     if (event.key === 'Enter' || event.key === 'ArrowDown') content.focus();
     return;
-  }
-  if (!couch && modal.hidden && nav.contains(event.target)) {
-    // In the sidebar: ↑ and ↓ move through the lists; Return or → opens the games.
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      event.preventDefault();
-      stepSidebar(event.key === 'ArrowUp' ? -1 : 1);
-    } else if ((event.key === 'Enter' || event.key === 'ArrowRight') && selection !== 'setup') {
-      event.preventDefault();
-      content.focus();
-    }
-    return;
-  }
-  if (!couch && modal.hidden && event.key === 'Escape') {
-    event.preventDefault();
-    return focusSidebar();
   }
   const cmd = KEYS[event.key];
   if (!cmd) return;
@@ -803,39 +1011,63 @@ window.addEventListener('blur', () => launching?.timer && hideLaunching());
 
 // ---- Controller ----------------------------------------------------------------------
 
-// Standard gamepad mapping: 0 A/✕, 1 B/○, 3 Y/△, 4 LB, 5 RB, 9 Start/Options, 12–15 D-pad.
-const BUTTONS = { 0: 'play', 1: 'back', 3: 'favorite', 4: 'prev', 5: 'next', 9: 'couch', 12: 'up', 13: 'down', 14: 'left', 15: 'right' };
+// Standard gamepad mapping: 0 A/✕, 1 B/○, 2 X/□, 3 Y/△, 4 LB, 5 RB, 8 View/Select/Share, 9 Menu/Start/Options,
+// 12–15 D-pad. Steam Deck, ROG Ally and Legion Go controllers report the same layout.
+const BUTTONS = { 0: 'play', 1: 'back', 2: 'menu', 3: 'favorite', 4: 'prev', 5: 'next', 8: 'setup', 9: 'couch',
+                  12: 'up', 13: 'down', 14: 'left', 15: 'right' };
+/** Held directions repeat, so a long list doesn't take a press per game: after this long, this often. */
+const REPEAT_DELAY_MS = 500;
+const REPEAT_EVERY_MS = 90;
+/** Inputs held down: key → { since, last } (when it was pressed, and when it last fired). */
 const held = new Map();
 
 function cleanPadName(id) {
   return id.replace(/\s*\(.*\)\s*$/, '').replace(/^[0-9a-f]{4}-[0-9a-f]{4}-/i, '').trim() || 'Controller';
 }
 
-/** Fires a command when an input goes from released to pressed, but only while RetroHub is in front. */
-function edge(key, down, cmd) {
-  const wasDown = held.get(key);
-  held.set(key, down);
-  if (down && !wasDown && document.hasFocus()) {
-    if (nav.contains(document.activeElement)) content.focus();
-    command(cmd);
+/**
+ * Fires a command when an input goes from released to pressed, then again while a direction is
+ * held, but only while RetroHub is in front (not while a game is).
+ */
+function edge(key, down, cmd, now) {
+  const state = held.get(key);
+  if (!down) {
+    held.delete(key);
+    return;
   }
+  if (!state) {
+    held.set(key, { since: now, last: now });
+  } else if (DIRECTIONS.includes(cmd) && now - state.since >= REPEAT_DELAY_MS && now - state.last >= REPEAT_EVERY_MS) {
+    state.last = now;
+  } else {
+    return;
+  }
+  if (!document.hasFocus()) return;
+  setInputMode('nav');
+  command(cmd);
 }
 
-function pollGamepads() {
-  const pads = [...navigator.getGamepads()].filter(Boolean);
+function pollGamepads(now) {
+  const pads = [...navigator.getGamepads()].filter((pad) => pad && pad.connected !== false);
   const name = pads[0] ? cleanPadName(pads[0].id) : null;
   if (name !== padName) {
+    // Not at startup: a controller that's already connected isn't news.
+    if (pollGamepads.started) showToast(name ? `${name} connected` : 'Controller disconnected');
     padName = name;
     renderController();
     if (selection === 'setup' && !couch) renderContent();
   }
+  pollGamepads.started = true;
+  // A controller that goes away mid-press mustn't leave a direction repeating.
+  const connected = new Set(pads.map((pad) => `${pad.index}:`));
+  for (const key of held.keys()) if (![...connected].some((prefix) => key.startsWith(prefix))) held.delete(key);
   for (const pad of pads) {
-    for (const [index, cmd] of Object.entries(BUTTONS)) edge(`${pad.index}:${index}`, !!pad.buttons[index]?.pressed, cmd);
+    for (const [index, cmd] of Object.entries(BUTTONS)) edge(`${pad.index}:${index}`, !!pad.buttons[index]?.pressed, cmd, now);
     const [x = 0, y = 0] = pad.axes;
-    edge(`${pad.index}:x-`, x < -0.6, 'left');
-    edge(`${pad.index}:x+`, x > 0.6, 'right');
-    edge(`${pad.index}:y-`, y < -0.6, 'up');
-    edge(`${pad.index}:y+`, y > 0.6, 'down');
+    edge(`${pad.index}:x-`, x < -0.6, 'left', now);
+    edge(`${pad.index}:x+`, x > 0.6, 'right', now);
+    edge(`${pad.index}:y-`, y < -0.6, 'up', now);
+    edge(`${pad.index}:y+`, y > 0.6, 'down', now);
   }
   requestAnimationFrame(pollGamepads);
 }
@@ -847,6 +1079,7 @@ function applyState(state, force = false) {
   if (!force && json === lastStateJSON) return;
   lastStateJSON = json;
   S = state;
+  document.documentElement.classList.toggle('handheld', !!S.handheld);
   render();
 }
 

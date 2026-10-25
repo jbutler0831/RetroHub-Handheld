@@ -43,15 +43,19 @@
   </div>
 
   <div id="modal" class="modal" hidden>
-    <div class="modal-box" role="alertdialog" aria-labelledby="modal-title">
+    <div class="modal-box" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-message">
       <div class="modal-icon"></div>
       <h2 id="modal-title">Couldn't start the game</h2>
       <p id="modal-message"></p>
-      <button class="button primary" id="modal-ok">OK</button>
+      <div class="modal-actions" id="modal-actions"></div>
     </div>
   </div>
 
+  <!-- Short messages that go away by themselves, such as a controller connecting. -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
   <script src="icons.js"></script>
+  <script src="spatial.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
