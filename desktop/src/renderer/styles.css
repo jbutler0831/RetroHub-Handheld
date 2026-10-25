@@ -553,5 +553,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .modal-icon { color: var(--orange); }
 .modal-box h2 { margin: 8px 0 6px; font-size: 16px; }
-.modal-box p { margin: 0 0 18px; color: var(--text-2); font-size: 13px; }
+.modal-box p { margin: 0 0 18px; color: var(--text-2); font-size: 13px; white-space: pre-line; overflow-wrap: anywhere; }
 .modal-box .button { width: 100%; justify-content: center; padding: 7px; }
+
+/* From Play until the emulator's window takes over: no animation, so it costs nothing while a game starts. */
+.launching { position: fixed; inset: 0; z-index: 19; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); }
+.launching-box { display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: min(520px, calc(100vw - 32px));
+  padding: 24px 32px; border-radius: 16px; background: #1c1c1e; color: #fff; text-align: center; }
+.launching-box strong { font-size: 22px; overflow-wrap: anywhere; }
+.launching-box span { font-size: 15px; opacity: 0.75; }
+.launching-box .launching-hint { font-size: 13px; opacity: 0.5; }

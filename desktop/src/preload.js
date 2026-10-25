@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('retrohub', {
   state: () => ipcRenderer.invoke('state'),
+  takeNotice: () => ipcRenderer.invoke('takeNotice'),
   rescan: () => ipcRenderer.invoke('rescan'),
   play: (id) => ipcRenderer.invoke('play', id),
   toggleFavorite: (id) => ipcRenderer.invoke('toggleFavorite', id),

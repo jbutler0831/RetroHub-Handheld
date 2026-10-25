@@ -10,6 +10,7 @@ const selectedGame = {};      // selection → game id
 let couch = false;
 let couchIndex = 0;
 let padName = null;
+let launching = null;         // { id, timer } from Play until the emulator's window takes over
 const coverCache = new Map(); // game id → Promise<file URL | null>
 
 const $ = (id) => document.getElementById(id);
@@ -226,7 +227,10 @@ function renderContent() {
   content.scrollTop = scroll;
 }
 
+const lookingHtml = () => `<div class="empty"><h3>Looking for games…</h3><p>Reading ${esc(S.libraryRoot)}.</p></div>`;
+
 function emptyHtml(system) {
+  if (!S.scanned) return lookingHtml();
   if (search.trim()) {
     return `<div class="empty"><h3>No results for “${esc(search.trim())}”</h3><p>Check the spelling or try a different search.</p></div>`;
   }
@@ -450,6 +454,11 @@ function pickedIndex() {
 
 function renderCouch() {
   const keys = couchKeys();
+  // The list on screen emptied (the last favorite removed, or the first scan just finished): go to one with games.
+  if (keys.length && !keys.includes(selection)) {
+    selection = keys[0];
+    couchIndex = pickedIndex();
+  }
   const games = gamesFor(selection);
   couchIndex = Math.min(couchIndex, Math.max(0, games.length - 1));
   const hint = (button, label) => `<span><span class="button-badge">${button}</span><span class="label">${label}</span></span>`;
@@ -463,7 +472,8 @@ function renderCouch() {
     <div class="couch-stage">${games.length
       ? `<div class="carousel" id="carousel">${games.map((g, i) => `<div class="cover" style="--c:${systemById(g.system).color}" data-cover="${esc(g.id)}" data-index="${i}">${placeholder(g, systemById(g.system))}<img alt="" hidden></div>`).join('')}</div>
          <div class="couch-details" id="couch-details"></div>`
-      : `<div class="couch-empty">${I.gamepad({ size: 64 })}<h2>No games yet</h2><p>Add games to ${esc(S.libraryRoot)} to see them here.</p></div>`}
+      : S.scanned ? `<div class="couch-empty">${I.gamepad({ size: 64 })}<h2>No games yet</h2><p>Add games to ${esc(S.libraryRoot)} to see them here.</p></div>`
+      : `<div class="couch-empty">${I.gamepad({ size: 64 })}<h2>Looking for games…</h2></div>`}
     </div>
     <div class="couch-hints">${hint('A', 'Play')}${hint('Y', 'Favorite')}${hint('LB RB', 'Switch')}${hint('B', 'Exit')}</div>`;
   loadCovers(couchEl);
@@ -506,7 +516,9 @@ function setCouch(on) {
 
 // ---- Actions -----------------------------------------------------------------------
 
-function showModal(message) {
+function showModal(message, title = "Couldn't start the game") {
+  hideLaunching();
+  $('modal-title').textContent = title;
   $('modal-message').textContent = message;
   $('modal').querySelector('.modal-icon').innerHTML = I.alert({ size: 34 });
   modal.hidden = false;
@@ -518,11 +530,42 @@ function hideModal() {
   content.focus();
 }
 
+/**
+ * "Starting Contra…" from the moment Play is pressed until the emulator's window comes to the front
+ * (RetroHub's window loses focus), so a press is never met with nothing; emulators can take several
+ * seconds to open. Play is ignored meanwhile, and B or Esc hides it.
+ */
+function showLaunching(game, label = null) {
+  clearTimeout(launching?.timer);
+  launching = { id: game.id, timer: label ? setTimeout(hideLaunching, 10000) : null };
+  $('launching-title').textContent = `Starting ${game.displayTitle}…`;
+  $('launching-detail').textContent = label ? `Opening ${label}` : '';
+  $('launching').hidden = false;
+}
+
+function hideLaunching() {
+  clearTimeout(launching?.timer);
+  launching = null;
+  $('launching').hidden = true;
+}
+
 async function play(id) {
+  if (launching) return;
   if (!couch) select(id);
-  const result = await api.play(id);
-  if (result.error) showModal(result.error);
-  else if (couch && selection === 'recent') couchIndex = 0; // The game just moved to the front.
+  const game = allGames().find((g) => g.id === id);
+  if (!game) return;
+  showLaunching(game);
+  let result;
+  try {
+    result = await api.play(id);
+  } catch (error) {
+    result = { error: error.message };
+  }
+  if (result.error) return showModal(result.error);
+  if (result.busy) return hideLaunching(); // Already starting from the game's menu.
+  if (!document.hasFocus()) return hideLaunching(); // The emulator is already in front.
+  if (launching?.id === id) showLaunching(game, result.label);
+  if (couch && selection === 'recent') couchIndex = 0; // The game just moved to the front.
 }
 
 function select(id, scroll = false) {
@@ -601,6 +644,10 @@ const focusSidebar = () => nav.querySelector('.nav-item.active')?.focus();
 function command(cmd) {
   if (!modal.hidden) {
     if (cmd === 'play' || cmd === 'back') hideModal();
+    return;
+  }
+  if (launching) {
+    if (cmd === 'back') hideLaunching();
     return;
   }
   if (couch) {
@@ -721,6 +768,10 @@ window.addEventListener('keydown', (event) => {
     }
     return; // Copy, paste and the rest behave as usual.
   }
+  if (launching && event.key === 'Escape') {
+    event.preventDefault();
+    return hideLaunching();
+  }
   if (event.target.id === 'search') {
     if (event.key === 'Escape') event.target.blur();
     if (event.key === 'Enter' || event.key === 'ArrowDown') content.focus();
@@ -747,6 +798,8 @@ window.addEventListener('keydown', (event) => {
   command(cmd);
 });
 window.addEventListener('resize', () => couch && updateCouch());
+// The emulator's window came to the front.
+window.addEventListener('blur', () => launching?.timer && hideLaunching());
 
 // ---- Controller ----------------------------------------------------------------------
 
@@ -807,4 +860,5 @@ api.state().then((state) => {
   if (state.consoleMode) setCouch(true);
   content.focus();
   requestAnimationFrame(pollGamepads);
+  api.takeNotice().then((notice) => notice && showModal(notice.message, notice.title));
 });

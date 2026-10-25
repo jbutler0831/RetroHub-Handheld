@@ -1,14 +1,14 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme } = require('electron');
-const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { SYSTEMS, MAKERS, EMULATORS } = require('./systems');
 const { scanLibrary, systemDir } = require('./library');
-const { availableEmulators, resolve, readiness, launch } = require('./emulators');
+const { availableEmulators, resolve, readiness, launch, lastOutput } = require('./emulators');
 const { coverPath, knownMissing, lookAgain } = require('./covers');
 const scanner = require('./scanner');
 const graphicsOptions = require('./graphics');
+const { readJSON, writeFileAtomic } = require('./store');
 
 const RECENT_LIMIT = 24;
 // `--console` starts full screen in couch mode, for devices that boot straight into RetroHub.
@@ -35,16 +35,22 @@ let settings = {
 };
 const APPEARANCES = ['system', 'light', 'dark'];
 
+/** Said once when the window opens, such as settings brought back from their backup: { title, message }. */
+let startupNotice = null;
+
 function loadSettings() {
-  try {
-    const saved = JSON.parse(fs.readFileSync(settingsFile(), 'utf8'));
-    settings = { ...settings, ...saved, graphics: { ...graphicsOptions.DEFAULTS, ...saved.graphics } };
-  } catch { /* first launch */ }
+  const { data: saved, recovered, setAside } = readJSON(settingsFile());
+  if (saved) settings = { ...settings, ...saved, graphics: { ...graphicsOptions.DEFAULTS, ...saved.graphics } };
+  const kept = setAside ? ` The damaged file was kept as ${path.basename(setAside)}.` : '';
+  if (recovered === 'backup') {
+    startupNotice = { title: 'Settings restored', message: `RetroHub's settings file was damaged, so it went back to the last good copy. A change made just before may be missing.${kept}` };
+  } else if (recovered === 'reset') {
+    startupNotice = { title: 'Settings reset', message: `RetroHub's settings file was damaged and there was no good copy to go back to, so it started with the default settings.${kept}` };
+  }
 }
 
 function saveSettings() {
-  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-  fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+  writeFileAtomic(settingsFile(), JSON.stringify(settings, null, 2));
 }
 
 // ---- Library state ----------------------------------------------------------
@@ -58,34 +64,67 @@ const coversDir = () => path.join(app.getPath('userData'), 'covers');
 const libraryFile = () => path.join(app.getPath('userData'), 'library.json');
 let library = { index: null, reviewedAt: 0 };
 
+/** A damaged index goes back to its backup, or starts over as a first scan: the games are still on disk. */
 function loadLibrary() {
-  try {
-    savedLibrary = fs.readFileSync(libraryFile(), 'utf8');
-    library = { ...library, ...JSON.parse(savedLibrary) };
-  } catch { /* first scan */ }
+  const { data, text } = readJSON(libraryFile());
+  if (data) library = { ...library, ...data };
+  savedLibrary = text;
 }
 
 let savedLibrary = '';
 
-/** Saves the index; RetroHub rescans each time its window comes forward, so only when it changed. */
+/** Saves the index; RetroHub rescans when its window comes forward, so only when it changed. */
 function saveLibrary() {
   const json = JSON.stringify(library);
   if (json === savedLibrary) return;
-  fs.mkdirSync(path.dirname(libraryFile()), { recursive: true });
-  fs.writeFileSync(libraryFile(), json);
+  writeFileAtomic(libraryFile(), json);
   savedLibrary = json;
 }
 
-function rescan() {
-  games = scanLibrary(settings.libraryRoot);
+async function scanOnce() {
+  const found = await scanLibrary(settings.libraryRoot);
+  games = found;
   gamesById.clear();
   for (const list of Object.values(games)) for (const game of list) gamesById.set(game.id, game);
   const now = Date.now();
   // The first scan is the baseline: what's there already isn't news.
   if (!library.index) library.reviewedAt = now;
   library.index = scanner.updateIndex(library.index, games, { now });
+  scanned = true;
   saveLibrary();
   fingerprintInBackground();
+}
+
+/** Whether the library has been scanned since RetroHub opened; until then the window says it's looking. */
+let scanned = false;
+let scanning = null;
+let scanAgain = false;
+let lastScanEnded = 0;
+// Coming back to RetroHub rescans, so new and moved games show up, but not more often than this:
+// switching windows back and forth shouldn't keep reading an SD card.
+const FOCUS_RESCAN_MS = 15000;
+
+/**
+ * Scans the library without blocking the window. A rescan asked for while one runs (the games
+ * folder just changed, say) runs once more when it ends; every caller waits for the scan it needs.
+ */
+function rescan() {
+  if (scanning) {
+    scanAgain = true;
+    return scanning;
+  }
+  scanning = (async () => {
+    try {
+      do {
+        scanAgain = false;
+        await scanOnce();
+      } while (scanAgain);
+    } finally {
+      scanning = null;
+      lastScanEnded = Date.now();
+    }
+  })();
+  return scanning;
 }
 
 let fingerprinting = false;
@@ -178,6 +217,7 @@ function state() {
   return {
     platform: process.platform,
     consoleMode,
+    scanned,
     libraryRoot: settings.libraryRoot,
     makers: MAKERS,
     systems: SYSTEMS.map(({ backends, ...info }) => ({ ...info, readiness: readiness({ backends, ...info }, settings.emulatorPaths) })),
@@ -200,17 +240,21 @@ function state() {
 }
 
 let win;
-/** The game RetroHub started, while its emulator runs: { game, label, process }. */
+/**
+ * The game RetroHub started, from the moment Play is pressed until its emulator closes:
+ * { game, label, process, startedAt, previousPlayed }. label and process are null while it starts.
+ */
 let session = null;
+/** An emulator that closes with an error this soon after starting failed to start the game. */
+const EARLY_EXIT_MS = 5000;
+/** What the last game's emulator printed (overwritten by the next game). */
+const gameLogFile = () => path.join(app.getPath('userData'), 'logs', 'last-game.log');
 
 function sendState() {
   win?.webContents.send('state', state());
 }
 
-/** RetroHub comes back to the front when the game is closed, as the Mac app does. */
-function gameEnded(child) {
-  if (session?.process !== child) return;
-  session = null;
+function bringForward() {
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore();
     win.show();
@@ -218,25 +262,65 @@ function gameEnded(child) {
   }
 }
 
+/**
+ * RetroHub comes back to the front when the game is closed, as the Mac app does. An emulator that
+ * closes with an error within a few seconds (a missing BIOS, a core that can't load the game)
+ * didn't really start it: RetroHub says so, with the emulator's last words, and the game doesn't
+ * count as played.
+ */
+function gameEnded(child, code, signal) {
+  if (session?.process !== child) return;
+  const ended = session;
+  session = null;
+  const failed = (code !== 0 || signal) && Date.now() - ended.startedAt < EARLY_EXIT_MS;
+  if (failed) {
+    if (ended.previousPlayed) settings.lastPlayed[ended.game.id] = ended.previousPlayed;
+    else delete settings.lastPlayed[ended.game.id];
+    saveSettings();
+    sendState();
+  }
+  bringForward();
+  if (failed) {
+    const how = signal ? `stopped (${signal})` : `closed with error code ${code}`;
+    const said = lastOutput(gameLogFile());
+    win?.webContents.send('error', [
+      `${ended.label} ${how} right after starting ${ended.game.displayTitle}.`,
+      said ? `It said: ${said}` : null,
+      'Check that the game file works in the emulator on its own, and that any BIOS or firmware it needs is installed.',
+    ].filter(Boolean).join('\n\n'));
+  }
+}
+
 async function play(id) {
   const game = gamesById.get(id);
   if (!game) return { error: 'That game is no longer in your library.' };
   // One game at a time: A pressed again while the emulator starts, or while it's open behind
-  // RetroHub, mustn't start a second copy.
+  // RetroHub, mustn't start a second copy. The session starts before anything is awaited, so a
+  // second press can't slip in while the first is still starting.
+  if (session && !session.process) return { busy: true };
   if (session) return { error: `${session.label} is still running ${session.game.displayTitle}. Close it to start another game.` };
+  session = { game, label: null, process: null, startedAt: Date.now(), previousPlayed: settings.lastPlayed[id] || null };
   try {
     // Console mode (a device that boots into RetroHub) always plays full screen.
     const fullscreen = consoleMode || settings.graphics.fullscreen !== false;
-    const started = await launch(game, settings.emulatorPaths, settings.graphics, { fullscreen });
-    if (started.process && started.process.exitCode === null) {
-      session = { game, label: started.label, process: started.process };
-      started.process.once('exit', () => gameEnded(started.process));
-    }
+    const started = await launch(game, settings.emulatorPaths, settings.graphics, { fullscreen, log: gameLogFile() });
     settings.lastPlayed[id] = Date.now();
     saveSettings();
+    if (started.process) {
+      Object.assign(session, { label: started.label, process: started.process });
+      // It may already have ended (an emulator that fails at once); 'exit' has fired by then.
+      if (started.process.exitCode !== null || started.process.signalCode !== null) {
+        gameEnded(started.process, started.process.exitCode, started.process.signalCode);
+      } else {
+        started.process.once('exit', (code, signal) => gameEnded(started.process, code, signal));
+      }
+    } else {
+      session = null; // OpenEmu: macOS opens it, and it stays open as a library app after the game.
+    }
     sendState();
-    return { ok: true };
+    return { ok: true, label: started.label };
   } catch (error) {
+    session = null;
     return { error: error.message };
   }
 }
@@ -252,7 +336,12 @@ function toggleFavorite(id) {
 // ---- IPC --------------------------------------------------------------------
 
 ipcMain.handle('state', () => state());
-ipcMain.handle('rescan', () => { rescan(); return state(); });
+ipcMain.handle('takeNotice', () => {
+  const notice = startupNotice;
+  startupNotice = null;
+  return notice;
+});
+ipcMain.handle('rescan', async () => { await rescan(); return state(); });
 ipcMain.handle('play', (_, id) => play(id));
 ipcMain.handle('toggleFavorite', (_, id) => toggleFavorite(id));
 ipcMain.handle('libraryAction', (_, action, details = {}) => {
@@ -299,7 +388,7 @@ ipcMain.handle('chooseRoot', async () => {
   if (!result.canceled && result.filePaths[0]) {
     settings.libraryRoot = result.filePaths[0];
     saveSettings();
-    rescan();
+    await rescan();
   }
   return state();
 });
@@ -371,7 +460,10 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true },
   });
   win.once('ready-to-show', () => win.show());
-  win.on('focus', () => { rescan(); sendState(); });
+  win.on('focus', () => {
+    if (scanning || Date.now() - lastScanEnded < FOCUS_RESCAN_MS) return;
+    rescan().then(sendState, () => {});
+  });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
@@ -397,8 +489,9 @@ app.whenReady().then(() => {
   loadLibrary();
   // Before the window is created, so it opens in the chosen appearance without a flash.
   nativeTheme.themeSource = APPEARANCES.includes(settings.appearance) ? settings.appearance : 'system';
-  rescan();
+  // The window opens straight away and says it's looking for games until the first scan is done.
   createWindow();
+  rescan().then(sendState, () => {});
 });
 
 app.on('window-all-closed', () => app.quit());

@@ -95,18 +95,58 @@ const coreExt = platform === 'darwin' ? 'dylib' : platform === 'win32' ? 'dll' :
 
 /**
  * Starts a program and resolves with its process once it's running. It's detached, so it keeps
- * running if RetroHub quits, but its 'exit' event still fires while RetroHub is open.
+ * running if RetroHub quits, but its 'exit' event still fires while RetroHub is open. The program
+ * gets its arguments as a list, never through a shell, so nothing in a file name is run as a command.
+ * With `log`, what the program prints goes to that file (a file rather than a pipe, so the emulator
+ * keeps running normally if RetroHub quits first).
  */
-function startProcess(command, args) {
+function startProcess(command, args, { log } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-    child.once('error', reject);
+    let output = 'ignore';
+    if (log) {
+      try {
+        fs.mkdirSync(path.dirname(log), { recursive: true });
+        output = fs.openSync(log, 'w');
+      } catch { /* no log, but still start the game */ }
+    }
+    const closeLog = () => typeof output === 'number' && fs.closeSync(output);
+    let child;
+    try {
+      child = spawn(command, args, { detached: true, stdio: ['ignore', output, output] });
+    } catch (error) {
+      closeLog();
+      return reject(error);
+    }
+    child.once('error', (error) => {
+      closeLog();
+      reject(error);
+    });
     child.once('spawn', () => {
+      closeLog(); // The child has its own copy.
       child.unref();
       resolvePromise(child);
     });
   });
 }
+
+/**
+ * What to tell the user when a program can't be started at all, from the operating system's error.
+ * Batch files are refused up front: on Windows they only run through a shell, and RetroHub doesn't
+ * use one.
+ */
+function startProblem(error, command) {
+  const name = path.basename(command);
+  if (error.code === 'ENOENT') return `The program ${name} wasn't found. It may have been moved or uninstalled: choose it again with Locate… in Setup.`;
+  if (error.code === 'EACCES' || error.code === 'EPERM') {
+    return platform === 'linux'
+      ? `${name} isn't allowed to run. If it's an AppImage, make it executable (right-click › Properties › Allow executing, or chmod +x).`
+      : `${name} isn't allowed to run. Check its permissions, or choose the emulator's program again with Locate… in Setup.`;
+  }
+  if (error.code === 'EINVAL' && /\.(bat|cmd)$/i.test(command)) return batchProblem(name);
+  return error.message;
+}
+
+const batchProblem = (name) => `${name} is a batch file, which RetroHub doesn't run. Choose the emulator's .exe program with Locate… in Setup.`;
 
 /** Full screen or in a window, for this run only (RetroArch's own setting is left alone). */
 function retroArchWindowArgs(fullscreen) {
@@ -118,7 +158,8 @@ function retroArchWindowArgs(fullscreen) {
  * with the emulator's process, or null for OpenEmu, which macOS opens and which stays open as a
  * library app after the game.
  */
-function plan(system, customPaths, graphics = graphicsOptions.DEFAULTS, { fullscreen = false } = {}) {
+function plan(system, customPaths, graphics = graphicsOptions.DEFAULTS, { fullscreen = false, log } = {}) {
+  const run = (command, args) => startLogged(command, args, { log });
   for (const backend of system.backends) {
     if (backend.type === 'retroarch') {
       const retroarch = resolve(EMULATORS.find((e) => e.id === 'retroarch'), customPaths);
@@ -129,7 +170,7 @@ function plan(system, customPaths, graphics = graphicsOptions.DEFAULTS, { fullsc
         if (corePath) {
           return {
             label: `RetroArch (${core.name})`,
-            start: (game) => startProcess(retroarch.command, [...retroarch.prefix, ...retroArchWindowArgs(fullscreen), '-L', corePath,
+            start: (game) => run(retroarch.command, [...retroarch.prefix, ...retroArchWindowArgs(fullscreen), '-L', corePath,
               ...graphicsOptions.retroArchArgs(system.id, core, retroarch, graphics), game]),
           };
         }
@@ -137,14 +178,14 @@ function plan(system, customPaths, graphics = graphicsOptions.DEFAULTS, { fullsc
     } else if (backend.type === 'openemu') {
       if (platform !== 'darwin') continue;
       const openemu = resolve(EMULATORS.find((e) => e.id === 'openemu'), customPaths);
-      if (openemu) return { label: 'OpenEmu', start: (game) => startProcess('open', ['-a', openemu.appPath, game]).then(() => null) };
+      if (openemu) return { label: 'OpenEmu', start: (game) => run('open', ['-a', openemu.appPath, game]).then(() => null) };
     } else {
       const emulator = EMULATORS.find((e) => e.id === backend.emulator);
       const resolved = resolve(emulator, customPaths);
       if (resolved) {
         // Vita3K runs installed games by title ID, the name of the game's folder.
         const target = (game) => (emulator.id === 'vita3k' ? path.basename(game) : game);
-        return { label: emulator.name, start: (game) => startProcess(resolved.command, [...resolved.prefix, ...backend.args, target(game)]) };
+        return { label: emulator.name, start: (game) => run(resolved.command, [...resolved.prefix, ...backend.args, target(game)]) };
       }
     }
   }
@@ -175,16 +216,54 @@ function readiness(system, customPaths) {
   return { ready: false, summary: 'Setup needed', detail, missing: ids[0] || null };
 }
 
-/** Starts the game; resolves with { label, process } (process is null for OpenEmu). */
-async function launch(game, customPaths, graphics, options) {
+/** startProcess, refusing batch files on Windows before trying (see startProblem). */
+function startLogged(command, args, options) {
+  if (platform === 'win32' && /\.(bat|cmd)$/i.test(command)) {
+    return Promise.reject(Object.assign(new Error(batchProblem(path.basename(command))), { code: 'BATCH' }));
+  }
+  return startProcess(command, args, options);
+}
+
+/**
+ * Starts the game; resolves with { label, process } (process is null for OpenEmu). options:
+ * { fullscreen, log } where log is the file the emulator's output goes to.
+ */
+async function launch(game, customPaths, graphics, options = {}) {
   const system = SYSTEMS.find((s) => s.id === game.system);
+  // An unplugged drive or a file removed since the last scan: say so rather than leave it to the emulator.
+  if (!exists(game.bootPath)) {
+    throw new Error(`${game.displayTitle} isn't where RetroHub found it (${path.basename(game.bootPath)}). If it's on a drive or SD card, connect it, then try again.`);
+  }
   const found = plan(system, customPaths, graphics, options);
   if (!found) throw new Error(readiness(system, customPaths).detail);
   try {
     return { label: found.label, process: await found.start(game.bootPath) };
   } catch (error) {
-    throw new Error(`Couldn't start ${found.label}: ${error.message}`);
+    throw new Error(`Couldn't start ${found.label}. ${error.code === 'BATCH' ? error.message : startProblem(error, error.path || '')}`);
   }
 }
 
-module.exports = { availableEmulators, resolve, readiness, launch, startProcess, retroArchWindowArgs };
+/** The last lines an emulator printed, for an error message: at most `max` characters, or ''. */
+function lastOutput(log, max = 300) {
+  let text;
+  try {
+    const handle = fs.openSync(log, 'r');
+    try {
+      const size = fs.fstatSync(handle).size;
+      const length = Math.min(size, 4096);
+      const buffer = Buffer.alloc(length);
+      fs.readSync(handle, buffer, 0, length, size - length);
+      text = buffer.toString('utf8');
+    } finally {
+      fs.closeSync(handle);
+    }
+  } catch {
+    return '';
+  }
+  const lines = text.split(/\r?\n/).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').trim()).filter(Boolean);
+  let result = '';
+  for (let i = lines.length - 1; i >= 0 && result.length + lines[i].length < max; i--) result = result ? `${lines[i]}\n${result}` : lines[i];
+  return result || (lines.length ? `${lines[lines.length - 1].slice(0, max - 1)}…` : '');
+}
+
+module.exports = { availableEmulators, resolve, readiness, launch, startProcess, startProblem, lastOutput, retroArchWindowArgs };

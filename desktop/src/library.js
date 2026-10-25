@@ -1,4 +1,6 @@
 // Finds games in the library folder. Mirrors mac/Sources/RetroHub/Library.swift.
+// Scanning reads the disk without blocking, so the window keeps answering the controller while a
+// large library on an SD card or external drive is read.
 const fs = require('fs');
 const path = require('path');
 const { SYSTEMS } = require('./systems');
@@ -20,9 +22,20 @@ function exists(file) {
   try { return fs.statSync(file) && true; } catch { return false; }
 }
 
-function listDir(dir) {
+async function existsAsync(file) {
+  try { return !!(await fs.promises.stat(file)); } catch { return false; }
+}
+
+/** The first of these files that exists, or undefined. */
+async function firstExisting(files) {
+  for (const file of files) if (await existsAsync(file)) return file;
+  return undefined;
+}
+
+/** A folder's entries without hidden files; an unreadable or missing folder is empty. */
+async function listDir(dir) {
   try {
-    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => !e.name.startsWith('.'));
+    return (await fs.promises.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.'));
   } catch {
     return [];
   }
@@ -32,12 +45,12 @@ function makeGame(system, title, bootPath, localCovers) {
   return { id: bootPath, system: system.id, title, displayTitle: displayTitle(title), bootPath, localCovers };
 }
 
-function scanFiles(system, dir) {
+async function scanFiles(system, dir) {
   const games = [];
-  for (const entry of listDir(dir)) {
+  for (const entry of await listDir(dir)) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      games.push(...scanFiles(system, full));
+      games.push(...(await scanFiles(system, full)));
     } else if (system.exts.includes(path.extname(entry.name).slice(1).toLowerCase())) {
       const base = full.slice(0, -path.extname(full).length);
       games.push(makeGame(system, path.basename(base), full, ['png', 'jpg', 'jpeg'].map((ext) => `${base}.${ext}`)));
@@ -47,29 +60,30 @@ function scanFiles(system, dir) {
 }
 
 /** Disc dumps keep EBOOT.BIN under PS3_GAME/USRDIR; PSN games keep it under USRDIR. */
-function scanPS3(system, dir) {
+async function scanPS3(system, dir) {
   const games = [];
-  for (const entry of listDir(dir)) {
+  for (const entry of await listDir(dir)) {
     if (!entry.isDirectory()) continue;
     const gameDir = path.join(dir, entry.name);
-    const eboot = ['PS3_GAME/USRDIR/EBOOT.BIN', 'USRDIR/EBOOT.BIN'].map((p) => path.join(gameDir, p)).find(exists);
+    const eboot = await firstExisting(['PS3_GAME/USRDIR/EBOOT.BIN', 'USRDIR/EBOOT.BIN'].map((p) => path.join(gameDir, p)));
     if (!eboot) continue;
-    const title = ['PS3_GAME/PARAM.SFO', 'PARAM.SFO'].map((p) => sfoTitle(path.join(gameDir, p))).find(Boolean) || entry.name;
+    let title = null;
+    for (const p of ['PS3_GAME/PARAM.SFO', 'PARAM.SFO']) title ||= await sfoTitle(path.join(gameDir, p));
     const covers = ['cover.png', 'cover.jpg', 'PS3_GAME/ICON0.PNG', 'ICON0.PNG'].map((p) => path.join(gameDir, p));
-    games.push(makeGame(system, title, eboot, covers));
+    games.push(makeGame(system, title || entry.name, eboot, covers));
   }
   return games;
 }
 
 /** PS4 game dumps keep eboot.bin at the top of the folder and their details under sce_sys. */
-function scanPS4(system, dir) {
+async function scanPS4(system, dir) {
   const games = [];
-  for (const entry of listDir(dir)) {
+  for (const entry of await listDir(dir)) {
     if (!entry.isDirectory()) continue;
     const gameDir = path.join(dir, entry.name);
     const eboot = path.join(gameDir, 'eboot.bin');
-    if (!exists(eboot)) continue;
-    const title = sfoTitle(path.join(gameDir, 'sce_sys/param.sfo')) || entry.name;
+    if (!(await existsAsync(eboot))) continue;
+    const title = (await sfoTitle(path.join(gameDir, 'sce_sys/param.sfo'))) || entry.name;
     const covers = ['cover.png', 'cover.jpg', 'sce_sys/icon0.png'].map((p) => path.join(gameDir, p));
     games.push(makeGame(system, title, eboot, covers));
   }
@@ -90,22 +104,26 @@ function systemDir(root, system) {
 }
 
 /** Games installed in Vita3K: one folder per title ID, with details under sce_sys. */
-function scanVita(system, dir) {
+async function scanVita(system, dir) {
   const games = [];
-  for (const entry of listDir(dir)) {
+  for (const entry of await listDir(dir)) {
     if (!entry.isDirectory()) continue;
     const gameDir = path.join(dir, entry.name);
     const sfo = path.join(gameDir, 'sce_sys/param.sfo');
-    if (!exists(sfo)) continue;
-    games.push(makeGame(system, sfoTitle(sfo) || entry.name, gameDir, [path.join(gameDir, 'sce_sys/icon0.png')]));
+    if (!(await existsAsync(sfo))) continue;
+    games.push(makeGame(system, (await sfoTitle(sfo)) || entry.name, gameDir, [path.join(gameDir, 'sce_sys/icon0.png')]));
   }
   return games;
 }
 
 /** Reads the TITLE entry from a PS3, PS4 or PS Vita PARAM.SFO file (little-endian key/value table). */
-function sfoTitle(file) {
+async function sfoTitle(file) {
   let data;
-  try { data = fs.readFileSync(file); } catch { return null; }
+  try { data = await fs.promises.readFile(file); } catch { return null; }
+  return sfoTitleFrom(data);
+}
+
+function sfoTitleFrom(data) {
   if (data.length < 20 || data.readUInt32BE(0) !== 0x00505346) return null;
   const keyTable = data.readUInt32LE(8), dataTable = data.readUInt32LE(12), count = data.readUInt32LE(16);
   for (let i = 0; i < count; i++) {
@@ -123,19 +141,19 @@ function sfoTitle(file) {
   return null;
 }
 
-/** Creates a folder per system under root and returns { systemId: [game] }. */
-function scanLibrary(root) {
+/** Creates a folder per system under root and resolves with { systemId: [game] }. */
+async function scanLibrary(root) {
   const result = {};
   for (const system of SYSTEMS) {
     const dir = systemDir(root, system);
     if (system.id !== 'vita') {
-      try { fs.mkdirSync(dir, { recursive: true }); } catch { /* read-only drive: just scan */ }
+      try { await fs.promises.mkdir(dir, { recursive: true }); } catch { /* read-only or unplugged drive: just scan */ }
     }
     const scan = { ps3: scanPS3, ps4: scanPS4, vita: scanVita }[system.id] || scanFiles;
-    const games = scan(system, dir);
+    const games = await scan(system, dir);
     result[system.id] = games.sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }));
   }
   return result;
 }
 
-module.exports = { scanLibrary, systemDir, stripTags, sfoTitle, exists };
+module.exports = { scanLibrary, systemDir, stripTags, sfoTitle, sfoTitleFrom, exists };
