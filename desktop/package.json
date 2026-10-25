@@ -1,7 +1,7 @@
 {
   "name": "retrohub",
   "productName": "RetroHub",
-  "version": "1.7.0-preview.1",
+  "version": "1.8.0-handheld.1",
   "description": "One library for your retro and console games",
   "main": "src/main.js",
   "author": "jbutler0831",
